@@ -1,0 +1,7 @@
+anthropic[bedrock]
+opencv-python-headless
+numpy<2
+python-dotenv
+flask
+flask-cors
+ultralytics

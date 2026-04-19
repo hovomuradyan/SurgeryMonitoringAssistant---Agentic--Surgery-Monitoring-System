@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+YOLO/.venv/
+
+# Build output
+dist/
+tsconfig.tsbuildinfo
+
+# Environment & secrets
+backend/.env
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+backend/events.json
+backend/yolo_objects.json
+
+# YOLO runtime
+YOLO/detections.json
+YOLO/run.json
+
+# Video files (large)
+backend/test.mp4
+YOLO/test.mp4
