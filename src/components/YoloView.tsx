@@ -4,10 +4,18 @@ import type { StreamSourceConfig } from "../types/stream";
 
 const BACKEND_URL = "/api";
 
-const yoloStreamConfig: StreamSourceConfig = {
+// Left (large): Surgeon Table — second camera (placeholder for now)
+const surgeonTableConfig: StreamSourceConfig = {
+  sourceType: "mjpeg",
+  url: `${BACKEND_URL}/yolo/video2`,
+  options: { label: "Surgeon Table" },
+};
+
+// Right (small): Instrument Table — YOLO detection from phone camera
+const instrumentTableConfig: StreamSourceConfig = {
   sourceType: "mjpeg",
   url: `${BACKEND_URL}/yolo/video`,
-  options: { label: "YOLO Detection" },
+  options: { label: "Instrument Table" },
 };
 
 interface ObjectState {
@@ -35,20 +43,18 @@ function ObjectCard({ obj }: { obj: ObjectState }) {
   const isVisible = !isMissing && !neverSeen;
 
   const frameLabel =
-    obj.last_frame === "frame1" ? "Surgeon Table" :
-    obj.last_frame === "frame2" ? "Instrument Table" :
-    obj.last_frame === "none" ? "Not visible" : obj.last_frame;
+    obj.last_frame === "frame1" ? "Instrument Table" :
+    obj.last_frame === "frame2" ? "Surgeon Table" :
+    "Not visible";
 
   return (
-    <div
-      className={`rounded-md border px-3 py-2 transition-all ${
-        isMissing
-          ? "border-red-400 dark:border-red-600 bg-red-100 dark:bg-red-900/40 ring-1 ring-red-300 dark:ring-red-700"
-          : isVisible
-          ? "border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/15"
-          : "border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50"
-      }`}
-    >
+    <div className={`rounded-md border px-3 py-2 transition-all ${
+      isMissing
+        ? "border-red-400 dark:border-red-600 bg-red-100 dark:bg-red-900/40 ring-1 ring-red-300 dark:ring-red-700"
+        : isVisible
+        ? "border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/15"
+        : "border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50"
+    }`}>
       <div className="flex items-center justify-between mb-1.5">
         <div className="flex items-center gap-1.5">
           <span className={`h-2 w-2 rounded-full flex-shrink-0 ${isMissing ? "bg-red-500 animate-pulse" : isVisible ? "bg-green-500" : "bg-gray-400"}`} />
@@ -56,16 +62,8 @@ function ObjectCard({ obj }: { obj: ObjectState }) {
             {obj.object_id}
           </span>
         </div>
-        {isMissing && (
-          <span className="text-[10px] font-bold text-red-600 dark:text-red-400 bg-red-200 dark:bg-red-800/50 px-1.5 py-0.5 rounded">
-            MISSING
-          </span>
-        )}
-        {isVisible && (
-          <span className="text-[10px] font-medium text-green-600 dark:text-green-400 bg-green-100 dark:bg-green-800/30 px-1.5 py-0.5 rounded">
-            VISIBLE
-          </span>
-        )}
+        {isMissing && <span className="text-[10px] font-bold text-red-600 dark:text-red-400 bg-red-200 dark:bg-red-800/50 px-1.5 py-0.5 rounded">MISSING</span>}
+        {isVisible && <span className="text-[10px] font-medium text-green-600 dark:text-green-400 bg-green-100 dark:bg-green-800/30 px-1.5 py-0.5 rounded">VISIBLE</span>}
       </div>
       <div className="grid grid-cols-2 gap-x-3 text-[10px] text-gray-500 dark:text-gray-400">
         <div>
@@ -143,7 +141,7 @@ function YoloView() {
     return logs.filter((l) => l.message.toLowerCase().includes(logFilter));
   }, [logs, logFilter]);
 
-  const placeholderVideo = (title: string) => (
+  const placeholderVideo = (title: string, subtitle?: string) => (
     <div className="rounded-lg shadow-sm overflow-hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 flex flex-col h-full">
       <div className="px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
         <h2 className="text-xs font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
@@ -151,7 +149,7 @@ function YoloView() {
       <div className="flex-1 flex items-center justify-center bg-gray-100 dark:bg-gray-800">
         <div className="text-center">
           <span className="text-2xl block mb-1">📦</span>
-          <p className="text-[10px] text-gray-500 dark:text-gray-400">Click Start Detection</p>
+          <p className="text-[10px] text-gray-500 dark:text-gray-400">{subtitle || "Click Start Detection"}</p>
         </div>
       </div>
     </div>
@@ -164,7 +162,7 @@ function YoloView() {
         <div>
           <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Instrument Tracking</h2>
           <p className="text-[10px] text-gray-500 dark:text-gray-400">
-            Tracking scissors · bottle · knife across surgeon table &amp; instrument table
+            Tracking scissors · bottle · knife — surgeon table (left) · instrument table (right)
           </p>
         </div>
         <button
@@ -185,22 +183,22 @@ function YoloView() {
         </button>
       </div>
 
-      {/* Content */}
+      {/* Content: large left video, smaller right column */}
       <div className="flex gap-2 flex-1 min-h-0">
-        {/* Left: main video (Surgeon Table) */}
+        {/* Left: Surgeon Table (large) */}
         <div className="flex-[5] min-h-0">
           {yoloRunning
-            ? <VideoPlayer title="Surgeon Table" streamConfig={yoloStreamConfig} />
-            : placeholderVideo("Surgeon Table")}
+            ? <VideoPlayer title="Surgeon Table" streamConfig={surgeonTableConfig} />
+            : placeholderVideo("Surgeon Table", "Camera URL not configured yet")}
         </div>
 
-        {/* Right column */}
-        <div className="flex-[3] flex flex-col gap-2 min-h-0">
-          {/* instrument table video */}
+        {/* Right column: Instrument Table video + cards + log */}
+        <div className="flex-[3] flex flex-col gap-2 min-h-0 min-w-[220px] max-w-[340px]">
+          {/* Instrument Table — YOLO detection (smaller) */}
           <div className="flex-[3] min-h-0">
             {yoloRunning
-              ? <VideoPlayer title="Instrument Table" streamConfig={yoloStreamConfig} />
-              : placeholderVideo("instrument table")}
+              ? <VideoPlayer title="Instrument Table — YOLO" streamConfig={instrumentTableConfig} />
+              : placeholderVideo("Instrument Table — YOLO")}
           </div>
 
           {/* Object tracking cards */}
@@ -213,7 +211,7 @@ function YoloView() {
                       <span className="h-2 w-2 rounded-full bg-gray-400" />
                       <span className="font-bold text-gray-400 capitalize">{name}</span>
                     </div>
-                    <div className="text-[10px] text-gray-400 mt-1">Waiting for detection…</div>
+                    <div className="text-[10px] text-gray-400 mt-1">Waiting…</div>
                   </div>
                 ))}
           </div>

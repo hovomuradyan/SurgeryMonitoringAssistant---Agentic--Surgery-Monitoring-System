@@ -53,46 +53,34 @@ _log_path = Path("events.json")
 _interval = 3.0
 
 
-SYSTEM_PROMPT = """You are a surgical scrub technique monitor watching a live OR camera. Your primary job is to narrate what is happening (info logs) and flag specific technique violations when you clearly see them.
+SYSTEM_PROMPT = """You are a surgical scrub technique monitor watching a live OR camera. You do TWO things on every frame:
 
-CADENCE: Log a brief info observation about current activity on EVERY frame. Only flag a violation (warning/critical) when you clearly see one — roughly every few frames at most.
+1. NARRATE: Call log_event with severity "info" to describe what is currently happening.
+2. FLAG VIOLATIONS: If you see any technique violation, call BOTH log_event with severity "warning" AND alert_team.
 
-TECHNIQUE VIOLATIONS TO WATCH FOR (flag as warning or critical):
-- Towel discarded incorrectly after drying (should be dropped into a designated area, not tossed)
-- Gown opened with sterile side facing the person (sterile side should face away)
+You must call BOTH tools in the same response when a violation is present. Always narrate first, then flag.
+
+TECHNIQUE VIOLATIONS TO WATCH FOR:
+- Towel discarded incorrectly after drying
+- Gown opened with sterile side facing the person
 - Gown not tied after donning
-- Towel or item dropped below the sterile field / below waist level
-- Gauze not counted in descending order during counts
-- Arms or hands dropping below waist level while scrubbed
-- Coughing or sneezing into hand (should turn away from field)
-- Instruments removed from tray during count (should be counted in the tray)
-- Counting too fast or in a disorganized manner
-- Hands not on the top plane when moving basin stand or equipment
-- Hands not wrapped and tucked behind drape when opening it
-- Circulator leaning over or making contact with sterile field
+- Towel or item dropped below sterile field / below waist
+- Gauze not counted in descending order
+- Arms or hands below waist while scrubbed
+- Coughing or sneezing into hand
+- Instruments removed from tray during count
+- Counting too fast or disorganized
+- Hands not on top plane when moving equipment
+- Hands not wrapped/tucked behind drape when opening
+- Circulator leaning over or contacting sterile field
 - Non-scrubbed person reaching across sterile area
-- Breaking sterile technique by touching non-sterile surfaces while scrubbed
-
-ROUTINE OBSERVATIONS (log as info — do this on every frame):
-- "Personnel gowning at back table"
-- "Scrub tech arranging instruments"
-- "Surgeon approaching sterile field"
-- "Count in progress"
-- "Circulator assisting with gown ties"
-- Brief description of the current activity visible in frame
+- Touching non-sterile surfaces while scrubbed
 
 RULES:
-- Use tools only. Never produce free-form text.
-- EVERY frame: log at least one info observation describing current activity.
-- Check recent event history. Do NOT re-log the same violation or same routine observation.
-- Only flag a violation if you can clearly see it happening — when in doubt, just log info.
-- Keep each observation under 15 words. Be terse and specific.
-- Only call alert_team for warning or critical severity.
-
-SEVERITY:
-- info: routine activity narration (use this most of the time)
-- warning: clear technique violation you can see in the frame
-- critical: active sterile breach with direct contamination risk"""
+- Use tools only. No free-form text.
+- Always call log_event (info) to narrate. Additionally call log_event (warning) + alert_team when you see a violation.
+- Check history — don't repeat the exact same observation.
+- Keep observations under 15 words."""
 
 TOOLS = [
     {
@@ -227,7 +215,7 @@ def video_reader(source):
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             continue
 
-        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
         with frame_lock:
             latest_frame = jpeg.tobytes()
             latest_frame_raw = frame.copy()
@@ -378,7 +366,7 @@ def video_feed():
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
-            time.sleep(1 / 30)
+            time.sleep(0.016)  # ~60 FPS cap
 
     return Response(
         generate(),
@@ -460,11 +448,18 @@ TRACKED_OBJECTS = {"scissors": 76, "bottle": 39, "knife": 43}
 TRACKED_CLASS_IDS = list(TRACKED_OBJECTS.values())
 MISSING_THRESHOLD_SEC = 7.0
 
+# Phone camera URL for YOLO detection
+YOLO_CAMERA_URL = "http://10.165.99.79:8080/video"
+
 # Object tracking state — shared with endpoints
 yolo_object_state = {}
 yolo_state_lock = threading.Lock()
 yolo_log_entries = []
 yolo_log_lock = threading.Lock()
+
+# Raw camera frame for the left video (non-annotated)
+yolo_raw_frame = None
+yolo_raw_lock = threading.Lock()
 
 
 def init_object_state():
@@ -503,8 +498,12 @@ def add_yolo_log(message, level="info"):
 
 
 def yolo_detection_loop(stop_event):
-    """Background thread: runs YOLO detection with object tracking."""
-    global yolo_annotated_frame, yolo_running_flag, yolo_object_state
+    """Background thread: reads from phone camera, runs YOLO detection.
+    
+    Architecture: camera reader runs in a sub-thread at full FPS,
+    YOLO grabs the latest frame when ready — no blocking.
+    """
+    global yolo_annotated_frame, yolo_running_flag, yolo_object_state, yolo_raw_frame
 
     yolo_dir = Path(__file__).parent.parent / "YOLO"
     model_path = yolo_dir / "yolov8n.pt"
@@ -522,28 +521,89 @@ def yolo_detection_loop(stop_event):
     model = YOLO(str(model_path))
     model.to("cpu")
 
+    # --- Camera reader sub-thread ---
+    cam_frame = None
+    cam_lock = threading.Lock()
+    cam_connected = threading.Event()
+
+    def camera_reader():
+        nonlocal cam_frame
+        import urllib.request
+
+        while not stop_event.is_set():
+            try:
+                stream = urllib.request.urlopen(YOLO_CAMERA_URL, timeout=10)
+                cam_connected.set()
+                buf = b""
+                while not stop_event.is_set():
+                    chunk = stream.read(8192)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    # Parse JPEG frames from MJPEG boundary
+                    while True:
+                        start = buf.find(b"\xff\xd8")
+                        end = buf.find(b"\xff\xd9", start + 2 if start >= 0 else 0)
+                        if start == -1 or end == -1 or end <= start:
+                            break
+                        jpg = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        decoded = cv2.imdecode(
+                            np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR
+                        )
+                        if decoded is not None:
+                            # Update raw frame for left video
+                            _, raw_jpeg = cv2.imencode(
+                                ".jpg", decoded, [cv2.IMWRITE_JPEG_QUALITY, 75]
+                            )
+                            with cam_lock:
+                                cam_frame = decoded
+                            with yolo_raw_lock:
+                                yolo_raw_frame = raw_jpeg.tobytes()
+            except Exception as e:
+                print(f"[yolo] Camera read error: {e}")
+                sys.stdout.flush()
+                time.sleep(1)
+
+    cam_thread = threading.Thread(target=camera_reader, daemon=True)
+    cam_thread.start()
+
+    # Wait for first frame
+    if not cam_connected.wait(timeout=10):
+        print(f"[yolo] ERROR: Cannot connect to camera at {YOLO_CAMERA_URL}")
+        sys.stdout.flush()
+        add_yolo_log(f"Cannot connect to camera at {YOLO_CAMERA_URL}", "warning")
+        yolo_running_flag = False
+        return
+
     # Initialize tracking state
     with yolo_state_lock:
         yolo_object_state = init_object_state()
         save_object_state(yolo_object_state, state_path)
 
-    # Track which objects were warned about (avoid spamming)
     warned_missing = set()
     last_state_update = time.time()
 
-    print("[yolo] Detection started — tracking: scissors, bottle, knife")
+    print(f"[yolo] Detection started — camera: {YOLO_CAMERA_URL}")
     sys.stdout.flush()
     add_yolo_log("YOLO detection started — tracking scissors, bottle, knife")
 
     while not stop_event.is_set():
-        with frame_lock:
-            frame = latest_frame_raw.copy() if latest_frame_raw is not None else None
+        # Grab latest frame from camera thread (non-blocking)
+        with cam_lock:
+            frame = cam_frame.copy() if cam_frame is not None else None
 
         if frame is None:
-            time.sleep(0.1)
+            time.sleep(0.05)
             continue
 
         try:
+            # Resize for faster inference
+            h, w = frame.shape[:2]
+            if w > 640:
+                scale = 640 / w
+                frame = cv2.resize(frame, (640, int(h * scale)))
+
             results = model.track(
                 frame, persist=True, verbose=False,
                 tracker=str(yolo_dir / "bytetrack.yaml"),
@@ -566,7 +626,7 @@ def yolo_detection_loop(stop_event):
             annotated = result.plot()
 
             # Encode both frames
-            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 50])
             with yolo_frame_lock:
                 yolo_annotated_frame = jpeg.tobytes()
 
@@ -656,11 +716,14 @@ def yolo_start():
 
 @app.route("/yolo/stop", methods=["POST"])
 def yolo_stop():
-    global yolo_running_flag
+    global yolo_running_flag, yolo_annotated_frame
 
     if not yolo_running_flag:
         return jsonify({"status": "not_running"})
     yolo_stop_event.set()
+    # Clear stale frames so next start doesn't flash old content
+    with yolo_frame_lock:
+        yolo_annotated_frame = None
     return jsonify({"status": "stopped"})
 
 
@@ -678,6 +741,26 @@ def yolo_log():
         return jsonify(yolo_log_entries)
 
 
+@app.route("/yolo/video2")
+def yolo_video2():
+    """Placeholder for second camera (surgeon table)."""
+    def generate():
+        while True:
+            with yolo_frame_lock:
+                frame = yolo_annotated_frame
+            if frame is not None:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                )
+            time.sleep(0.016)
+
+    return Response(
+        generate(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 @app.route("/yolo/video")
 def yolo_video():
     """MJPEG stream of YOLO-annotated frames."""
@@ -690,15 +773,7 @@ def yolo_video():
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
-            else:
-                with frame_lock:
-                    raw = latest_frame
-                if raw is not None:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n" + raw + b"\r\n"
-                    )
-            time.sleep(1 / 20)  # ~20 FPS delivery
+            time.sleep(0.016)
 
     return Response(
         generate(),

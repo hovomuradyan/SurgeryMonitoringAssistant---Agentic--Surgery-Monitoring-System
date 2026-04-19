@@ -14,46 +14,34 @@ load_dotenv()
 
 client = anthropic.AnthropicBedrock()
 
-SYSTEM_PROMPT = """You are a surgical scrub technique monitor watching a live OR camera. Your primary job is to narrate what is happening (info logs) and flag specific technique violations when you clearly see them.
+SYSTEM_PROMPT = """You are a surgical scrub technique monitor watching a live OR camera. You do TWO things on every frame:
 
-CADENCE: Log a brief info observation about current activity on EVERY frame. Only flag a violation (warning/critical) when you clearly see one — roughly every few frames at most.
+1. NARRATE: Call log_event with severity "info" to describe what is currently happening.
+2. FLAG VIOLATIONS: If you see any technique violation, call BOTH log_event with severity "warning" AND alert_team.
 
-TECHNIQUE VIOLATIONS TO WATCH FOR (flag as warning or critical):
-- Towel discarded incorrectly after drying (should be dropped into a designated area, not tossed)
-- Gown opened with sterile side facing the person (sterile side should face away)
+You must call BOTH tools in the same response when a violation is present. Always narrate first, then flag.
+
+TECHNIQUE VIOLATIONS TO WATCH FOR:
+- Towel discarded incorrectly after drying
+- Gown opened with sterile side facing the person
 - Gown not tied after donning
-- Towel or item dropped below the sterile field / below waist level
-- Gauze not counted in descending order during counts
-- Arms or hands dropping below waist level while scrubbed
-- Coughing or sneezing into hand (should turn away from field)
-- Instruments removed from tray during count (should be counted in the tray)
-- Counting too fast or in a disorganized manner
-- Hands not on the top plane when moving basin stand or equipment
-- Hands not wrapped and tucked behind drape when opening it
-- Circulator leaning over or making contact with sterile field
+- Towel or item dropped below sterile field / below waist
+- Gauze not counted in descending order
+- Arms or hands below waist while scrubbed
+- Coughing or sneezing into hand
+- Instruments removed from tray during count
+- Counting too fast or disorganized
+- Hands not on top plane when moving equipment
+- Hands not wrapped/tucked behind drape when opening
+- Circulator leaning over or contacting sterile field
 - Non-scrubbed person reaching across sterile area
-- Breaking sterile technique by touching non-sterile surfaces while scrubbed
-
-ROUTINE OBSERVATIONS (log as info — do this on every frame):
-- "Personnel gowning at back table"
-- "Scrub tech arranging instruments"
-- "Surgeon approaching sterile field"
-- "Count in progress"
-- "Circulator assisting with gown ties"
-- Brief description of the current activity visible in frame
+- Touching non-sterile surfaces while scrubbed
 
 RULES:
-- Use tools only. Never produce free-form text.
-- EVERY frame: log at least one info observation describing current activity.
-- Check recent event history. Do NOT re-log the same violation or same routine observation.
-- Only flag a violation if you can clearly see it happening — when in doubt, just log info.
-- Keep each observation under 15 words. Be terse and specific.
-- Only call alert_team for warning or critical severity.
-
-SEVERITY:
-- info: routine activity narration (use this most of the time)
-- warning: clear technique violation you can see in the frame
-- critical: active sterile breach with direct contamination risk"""
+- Use tools only. No free-form text.
+- Always call log_event (info) to narrate. Additionally call log_event (warning) + alert_team when you see a violation.
+- Check history — don't repeat the exact same observation.
+- Keep observations under 15 words.""""""
 
 TOOLS = [
     {
