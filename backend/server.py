@@ -53,34 +53,39 @@ _log_path = Path("events.json")
 _interval = 3.0
 
 
-SYSTEM_PROMPT = """You are a surgical scrub technique monitor watching a live OR camera. You do TWO things on every frame:
+MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-1. NARRATE: Call log_event with severity "info" to describe what is currently happening.
-2. FLAG VIOLATIONS: If you see any technique violation, call BOTH log_event with severity "warning" AND alert_team.
+SYSTEM_PROMPT = """You are an autonomous surgical safety monitor watching a live OR camera.
 
-You must call BOTH tools in the same response when a violation is present. Always narrate first, then flag.
+You combine TWO specialist perspectives in a single analysis:
 
-TECHNIQUE VIOLATIONS TO WATCH FOR:
-- Towel discarded incorrectly after drying
-- Gown opened with sterile side facing the person
-- Gown not tied after donning
-- Towel or item dropped below sterile field / below waist
-- Gauze not counted in descending order
-- Arms or hands below waist while scrubbed
-- Coughing or sneezing into hand
-- Instruments removed from tray during count
-- Counting too fast or disorganized
-- Hands not on top plane when moving equipment
-- Hands not wrapped/tucked behind drape when opening
-- Circulator leaning over or contacting sterile field
-- Non-scrubbed person reaching across sterile area
-- Touching non-sterile surfaces while scrubbed
+STERILITY CHECK:
+- Sterile field integrity (draped surfaces, sterile zones)
+- Surface disinfection and contamination events
+- Instrument and material placement
+- Contact between sterile and non-sterile items or surfaces
+- Foreign objects on sterile surfaces
 
-RULES:
-- Use tools only. No free-form text.
-- Always call log_event (info) to narrate. Additionally call log_event (warning) + alert_team when you see a violation.
-- Check history — don't repeat the exact same observation.
-- Keep observations under 15 words."""
+COMPLIANCE CHECK:
+- PPE compliance (gloves, gown, mask, cap — presence and correct wear)
+- Body positioning and movement within permitted zones
+- Gowning and gloving technique and sequence
+- Procedure step order and correctness
+- Unauthorized personnel or zone violations
+
+Rules:
+- Use tools only. Never produce free-form text.
+- Scan the ENTIRE frame. Log every distinct issue — do not stop at one.
+- CRITICAL: Check recent event history first. Do NOT re-log issues already recorded.
+- Only log issues that are NEW or have materially changed since last logged.
+- Keep each observation under 12 words. Be terse and specific.
+- If nothing new is wrong, call nothing.
+- Do NOT alert for ambiguous or partially visible situations. Only alert when the violation is clearly visible.
+
+Severity:
+- info: routine activity, no concern
+- warning: visible protocol deviation (wrong attire, item in wrong zone, missed step) — also call alert_team
+- critical: active sterile breach, sharps danger, contamination — always call alert_team"""
 
 TOOLS = [
     {
@@ -91,7 +96,6 @@ TOOLS = [
             "properties": {
                 "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
                 "observation": {"type": "string"},
-                "action_taken": {"type": "string"},
             },
             "required": ["severity", "observation"],
         },
@@ -226,7 +230,7 @@ def video_reader(source):
 
 
 def agent_loop(log_path, interval, stop_event):
-    """Background thread: grabs latest frame periodically and sends to Anthropic Bedrock."""
+    """Background thread: single-call agent with combined sterility + compliance prompt."""
     global agent_running
 
     client = anthropic.AnthropicBedrock()
@@ -275,7 +279,7 @@ def agent_loop(log_path, interval, stop_event):
                     },
                     {
                         "type": "text",
-                        "text": f"Analyze this frame. Only log issues not already in history.{history_text}",
+                        "text": f"Analyze this frame for both sterility and compliance issues. Only log issues not already in history.{history_text}",
                     },
                 ],
             }
@@ -284,7 +288,7 @@ def agent_loop(log_path, interval, stop_event):
         try:
             while not stop_event.is_set():
                 response = client.messages.create(
-                    model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                    model=MODEL,
                     max_tokens=2048,
                     system=[{
                         "type": "text",
@@ -331,7 +335,6 @@ def agent_loop(log_path, interval, stop_event):
                     break
                 time.sleep(1)
 
-        # Wait for the interval before next analysis
         for _ in range(int(interval)):
             if stop_event.is_set():
                 break
